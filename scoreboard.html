@@ -518,10 +518,10 @@ function App(){
       if(!blob) blob=defaultBlob();
       setFromBlob(blob);
       const cj=canon(blob);lastBlobRef.current=cj;lastRemoteRef.current=cj;
-      if(HAS_GS){try{await gs("saveData",cj);lastRemoteRef.current=cj;}catch(e){}}
+      if(HAS_GS){gs("saveData",cj).catch(()=>{});}
     }
-    if(HAS_GS){try{const u=await gs("getDatabaseUrl");if(u) setDbUrl(u);}catch(e){}}
     setLoaded(true);
+    if(HAS_GS){gs("getDatabaseUrl").then(u=>{if(u) setDbUrl(u);}).catch(()=>{});}
   })();},[]);
 
   // Save (debounced)
