@@ -272,6 +272,23 @@ async function gs(action, payload) {
   return json.result;
 }
 
+// v8.1：全班同時交易時，後端的全域鎖可能會短暫排隊逾時（不是分數不夠、不是沒有持倉
+// 這種「真的不能做」的錯誤，純粹是排隊排太久）。這種情況重試幾次通常就過了——
+// 交易逾時代表後端根本沒拿到鎖、完全沒有改到任何資料，重試是安全的，不會重複扣款。
+// 業務邏輯錯誤（分數不足等）不需要重試，訊息會一樣，白白浪費時間，直接篩掉。
+const NO_RETRY_MSG = ["分數不足","無法賣出","未知的投資標的","賣出比例不正確","找不到學生","投入分數不正確"];
+async function investCall(action, payload, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try { return await gs(action, payload); }
+    catch (err) {
+      const msg = err.message || "";
+      const giveUp = NO_RETRY_MSG.some(k => msg.includes(k)) || i === tries - 1;
+      if (giveUp) throw err;
+      await new Promise(r => setTimeout(r, 700 * (i + 1)));
+    }
+  }
+}
+
 const HAS_GS = !!SCRIPT_URL;
 const LS_CACHE = "ce.cache.v1";
 const lsGet = k => {try{return localStorage.getItem(k);}catch(e){return null;}};
@@ -475,9 +492,11 @@ function App(){
   useEffect(()=>{
     if(!loaded) return;
     let cancelled=false;
-    const load=()=>gs('marketData').then(d=>{if(!cancelled) setMarketData(d);}).catch(()=>{});
+    // v8.1：行情後端 15 分鐘才真的更新一次，問太頻繁只是白白佔用 Apps Script 同時執行額度，
+    // 全班同時用的時候尤其明顯，所以拉長到 3 分鐘一次，分頁切到背景時也暫停。
+    const load=()=>{if(document.hidden) return; gs('marketData').then(d=>{if(!cancelled) setMarketData(d);}).catch(()=>{});};
     load();
-    const iv=setInterval(load,60000);
+    const iv=setInterval(load,180000);
     return ()=>{cancelled=true;clearInterval(iv);};
   },[loaded]);
   // 大螢幕模式時給 body 加上 class，讓彈出視窗自動放大
@@ -677,7 +696,7 @@ function App(){
     if(pts>trader.points){pushToast("分數不足，可到借貸中心借分","down");return;}
     const asset=assetById_(fAssetId);
     try{
-      const res=await gs('investBuy',{className:active?.name||"",studentId:tradeId,studentName:trader.name,assetId:fAssetId,points:pts});
+      const res=await investCall('investBuy',{className:active?.name||"",studentId:tradeId,studentName:trader.name,assetId:fAssetId,points:pts});
       const qty=pts/res.price;
       setStudents(prev=>prev.map(s=>s.id===tradeId?{...logS(s,`買入${asset.name} ${qty.toFixed(4)}（投入${np(pts)}分）`,-pts),points:res.points,holdings:res.holdings}:s));
       pushToast(`${trader.name}　投入 ${np(pts)} 分買入${asset.name}`,null);setFInvest("");bumpKioskCooldown();
@@ -689,7 +708,7 @@ function App(){
     const h=trader.holdings&&trader.holdings[fAssetId];
     if(!h||!(h.qty>0)) return;
     try{
-      const res=await gs('investSell',{className:active?.name||"",studentId:tradeId,studentName:trader.name,assetId:fAssetId,frac});
+      const res=await investCall('investSell',{className:active?.name||"",studentId:tradeId,studentName:trader.name,assetId:fAssetId,frac});
       setStudents(prev=>prev.map(s=>s.id===tradeId?{...logS(s,`賣出${asset.name}（損益${res.realized>=0?"+":""}${np(res.realized)}）`,r1(res.points-s.points)),points:res.points,holdings:res.holdings}:s));
       pushToast(`${trader.name}　賣出${asset.name}　損益 ${res.realized>=0?"+":""}${np(res.realized)}`,res.realized>=0?"up":"down");bumpKioskCooldown();
     }catch(err){pushToast(err.message,"down");}
