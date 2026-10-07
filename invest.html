@@ -105,6 +105,22 @@ async function gs(action, payload) {
   if (!json.ok) throw new Error(json.error || 'API 發生錯誤');
   return json.result;
 }
+
+// v8.1：全班同時交易時，後端的全域鎖可能會短暫排隊逾時（不是分數不夠、不是沒有持倉
+// 這種「真的不能做」的錯誤，純粹是排隊排太久）。交易逾時代表後端根本沒拿到鎖、
+// 完全沒有改到任何資料，重試是安全的，不會重複扣款，業務邏輯錯誤不需要重試。
+const NO_RETRY_MSG = ["分數不足","無法賣出","未知的投資標的","賣出比例不正確","找不到學生","投入分數不正確"];
+async function investCall(action, payload, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try { return await gs(action, payload); }
+    catch (err) {
+      const msg = err.message || "";
+      const giveUp = NO_RETRY_MSG.some(k => msg.includes(k)) || i === tries - 1;
+      if (giveUp) throw err;
+      await new Promise(r => setTimeout(r, 700 * (i + 1)));
+    }
+  }
+}
 </script>
 <script type="text/babel">
 const {useState, useEffect, useRef, useMemo} = React;
@@ -256,9 +272,10 @@ function TradeScreen({ player, setPlayer, onSwitch }) {
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => gs('marketData').then(d => { if (!cancelled) setMarketData(d); }).catch(() => {});
+    // v8.1：行情後端 15 分鐘才真的更新一次，拉長輪詢間隔減少同時連線數
+    const load = () => { if (document.hidden) return; gs('marketData').then(d => { if (!cancelled) setMarketData(d); }).catch(() => {}); };
     load();
-    const iv = setInterval(load, 60000);
+    const iv = setInterval(load, 180000);
     return () => { cancelled = true; clearInterval(iv); };
   }, []);
 
@@ -280,7 +297,7 @@ function TradeScreen({ player, setPlayer, onSwitch }) {
     if (pts > player.points) { pushToast('分數不足', 'down'); return; }
     setBusy(true);
     try {
-      const res = await gs('investBuy', { className: player.className, studentId: player.studentId, studentName: player.studentName, assetId, points: pts });
+      const res = await investCall('investBuy', { className: player.className, studentId: player.studentId, studentName: player.studentName, assetId, points: pts });
       setPlayer(p => ({ ...p, points: res.points, holdings: res.holdings }));
       pushToast(`買入 ${asset.name}，投入 ${np(pts)} 分`, null);
       setFInvest('');
@@ -291,7 +308,7 @@ function TradeScreen({ player, setPlayer, onSwitch }) {
     if (!(h.qty > 0)) return;
     setBusy(true);
     try {
-      const res = await gs('investSell', { className: player.className, studentId: player.studentId, studentName: player.studentName, assetId, frac });
+      const res = await investCall('investSell', { className: player.className, studentId: player.studentId, studentName: player.studentName, assetId, frac });
       setPlayer(p => ({ ...p, points: res.points, holdings: res.holdings }));
       pushToast(`賣出 ${asset.name}，損益 ${res.realized >= 0 ? '+' : ''}${np(res.realized)}`, res.realized >= 0 ? 'up' : 'down');
     } catch (err) { pushToast(err.message, 'down'); }
