@@ -318,7 +318,9 @@ function defaultBlob(){
 function tutorBonus(imp,t){if(imp<=t.threshold) return 0;return r1(t.base+(imp-t.threshold)*t.perPoint);}
 function examBonus(actual,target,bands){
   if(actual<target) return {ok:false,pts:0};
-  for(const b of bands) if(actual>=b.min) return {ok:true,pts:b.pts};
+  // 達標後的加分，看「自己設定的目標」落在哪個級距，不是看實際考幾分——
+  // 不然設低目標、意外考高分的人會拿到比設高目標的人還多的加分，鼓勵亂設目標。
+  for(const b of bands) if(target>=b.min) return {ok:true,pts:b.pts};
   return {ok:true,pts:0};
 }
 function loanOwed(l,rate){const days=(nowMs()-l.start)/86400000;return l.principal*Math.pow(1+rate,days);}
@@ -444,8 +446,10 @@ function KioskView({students, settings, prices, rate, className, applyDelta, ope
       e("button", { className: "kActBtn pos", disabled: onCooldown, onClick: () => quickAction("協助同學解決錯題", settings.help) }, "🤝 助人 +", settings.help),
       e("button", { className: "kActBtn neg", disabled: onCooldown, onClick: () => openGated("forget") }, "😅 忘記帶東西"),
       e("button", { className: "kActBtn", disabled: onCooldown, onClick: () => openGated("examtarget") }, "🎯 月考目標"),
-      e("button", { className: "kActBtn", disabled: onCooldown, onClick: () => openGated("examscore") }, "📝 月考成績"),
-      e("button", { className: "kActBtn", disabled: onCooldown, onClick: () => openGated("tutor") }, "🎓 輔導"),
+      // 這次月考成績已登記過（不論是自己或老師在後台登記）就不能再送出，避免重複加分
+      e("button", { className: "kActBtn", disabled: onCooldown || !!student.examGraded, onClick: () => openGated("examscore") }, student.examGraded ? "📝 月考成績（已登記）" : "📝 月考成績"),
+      // 「輔導」不放在學生端：進步分數由學生自己填、沒有驗證，也會和後台的「輔導配對」重複發分。
+      // 輔導加分改由老師在教師後台的「輔導配對」結算；例外情況老師仍可在計分板學生列按「輔導」手動補發。
       e("button", { className: "kActBtn", onClick: () => setScreen('market') }, "📈 投資"),
       e("button", { className: "kActBtn", onClick: () => setScreen('loan') }, "🏦 借貸"),
       e("button", { className: "kActBtn", onClick: () => open("leave", student.id) }, "🌴 請假")
@@ -476,6 +480,7 @@ function App(){
   // Form states
   const [fItems,setFItems]=useState([]);
   const [fTarget,setFTarget]=useState("");const [fActual,setFActual]=useState("");
+  const [fBulkOnlyUnset,setFBulkOnlyUnset]=useState(true);
   const [fTutee,setFTutee]=useState("");const [fImp,setFImp]=useState("");
   const [fBorrow,setFBorrow]=useState("");const [fVal,setFVal]=useState("");const [fNote,setFNote]=useState("");
   const [fName,setFName]=useState("");const [fInvest,setFInvest]=useState("");const [fImport,setFImport]=useState("");
@@ -606,6 +611,7 @@ function App(){
     const s=students.find(x=>x.id===id);
     if(kind==="forget") setFItems([]);
     if(kind==="examtarget") setFTarget(s?.examTarget!=null?String(s.examTarget):"80");
+    if(kind==="examtargetbulk"){setFTarget("80");setFBulkOnlyUnset(true);}
     if(kind==="examscore") setFActual("");
     if(kind==="tutor"){setFTutee("");setFImp("");}
     if(kind==="borrow") setFBorrow("");
@@ -629,9 +635,24 @@ function App(){
     pushToast(`${nameOf(modal.id)}　設定月考目標 ${target} 分`,null);
     bumpKioskCooldown();close();
   }
+  // ①b 全班一次設定同一個目標分數（個別調整過的人預設不覆蓋，見 fBulkOnlyUnset）
+  function confirmExamTargetBulk(){
+    const target=Number(fTarget);if(!Number.isFinite(target)) return;
+    const label=`設定月考目標：${target}分（全班統一設定）`;
+    let n=0;
+    setStudents(prev=>prev.map(s=>{
+      if(fBulkOnlyUnset && s.examTargetSetAt) return s;
+      n++;
+      return {...logS(s,label,0),examTarget:target,examTargetSetAt:nowMs(),examGraded:false};
+    }));
+    pushToast(n>0?`已為 ${n} 位學生設定月考目標 ${target} 分`:"沒有學生被套用（可能都已個別設定過）",null);
+    bumpKioskCooldown();close();
+  }
   // ② 考後：輸入實際分數，一律用「考前已設定的目標」計算，不能臨時改目標
   function confirmExamScore(){
     const actual=Number(fActual);if(!Number.isFinite(actual)||!cur) return;
+    // 學生端（大螢幕模式）已登記過就不能再送出；老師端仍保留「確認後可再送一次」（上面視窗有警告）
+    if(kioskMode&&cur.examGraded){pushToast("這次月考成績已經登記過囉","down");close();return;}
     const target=(cur.examTarget!=null)?cur.examTarget:80;
     const res=examBonus(actual,target,settings.bands);
     const label=res.ok?`月考達標（目標${target}／實際${actual}）`:`月考未達標（目標${target}／實際${actual}）`;
@@ -731,7 +752,7 @@ function App(){
   function confirmLeave(){
     if(!cur) return;setLeaveBusy(true);
     const doLeave=async()=>{
-      if(HAS_GS){await gs("submitLeave",{className:active?.name||"",studentName:cur.name,leaveType:fLeaveType,date:fLeaveDate,note:fLeaveNote});}
+      if(HAS_GS){await gs("submitLeave",{className:active?.name||"",studentId:cur.id,studentName:cur.name,leaveType:fLeaveType,date:fLeaveDate,note:fLeaveNote});}
       setLeaveBusy(false);pushToast(`${cur.name}　已登記${fLeaveType}`,null);close();
     };
     doLeave().catch(()=>{setLeaveBusy(false);pushToast("請假登記失敗","down");});
@@ -796,9 +817,17 @@ function App(){
       e("div",{className:"field"},e("label",null,"自訂月考目標"),e("input",{className:"inp mono",inputMode:"numeric",value:fTarget,onChange:ev=>setFTarget(ev.target.value)})),
       cur.examTargetSetAt&&e("div",{className:"note"},"目前已設定：",cur.examTarget,"分（",clock(cur.examTargetSetAt),"）",cur.examGraded?"，這次月考已經登記過成績了":"，尚未登記成績")
     ),
+    modal&&modal.kind==="examtargetbulk"&&e(Modal,{title:`${active?active.name:""}｜全班統一設定月考目標`,onClose:close,foot:e(React.Fragment,null,e("button",{className:"btn gh",onClick:close},"取消"),e("button",{className:"btn gr",onClick:confirmExamTargetBulk},"套用"))},
+      e("div",{className:"note"},"幫整班一次設定同一個月考目標分數，之後仍可以用每個學生卡片上的「🎯 月考目標」個別調整。"),
+      e("div",{className:"field"},e("label",null,"全班統一目標"),e("input",{className:"inp mono",inputMode:"numeric",value:fTarget,onChange:ev=>setFTarget(ev.target.value)})),
+      e("label",{style:{display:"flex",gap:8,alignItems:"center",marginTop:10,cursor:"pointer"}},
+        e("input",{type:"checkbox",checked:fBulkOnlyUnset,onChange:ev=>setFBulkOnlyUnset(ev.target.checked)}),
+        e("span",{className:"note"},"只套用到「還沒設定過目標」的學生（不覆蓋已經個別調整過的人）")),
+      e("div",{className:"note",style:{marginTop:10}},"班上共 ",students.length," 位學生，目前已設定過目標的有 ",students.filter(s=>s.examTargetSetAt).length," 位。")
+    ),
     modal&&cur&&modal.kind==="examscore"&&e(Modal,{title:`${cur.name}｜月考成績登記`,onClose:close,foot:e(React.Fragment,null,e("button",{className:"btn gh",onClick:close},"取消"),e("button",{className:"btn gr",onClick:confirmExamScore},"確認"))},
       cur.examTargetSetAt
-        ? e("div",{className:"note"},"目標分數：",e("b",null,cur.examTarget),"分（設定於 ",clock(cur.examTargetSetAt),"）。加分依實際級距：",settings.bands.map(b=>`${b.min}↑ +${b.pts}`).join("、"),"。")
+        ? e("div",{className:"note"},"目標分數：",e("b",null,cur.examTarget),"分（設定於 ",clock(cur.examTargetSetAt),"）。達標後加分依「目標」所在級距：",settings.bands.map(b=>`${b.min}↑ +${b.pts}`).join("、"),"（只要考到目標分以上就算達標，加分看目標、不是看實際考幾分）。")
         : e("div",{className:"note",style:{color:"var(--red)"}},"這位同學這次沒有先設定目標，將以預設 80 分計算達標。"),
       e("div",{className:"field"},e("label",null,"實際考試分數"),e("input",{className:"inp mono",inputMode:"numeric",value:fActual,onChange:ev=>setFActual(ev.target.value)})),
       fActual!==""&&(()=>{const r=examBonus(Number(fActual),cur.examTarget!=null?cur.examTarget:80,settings.bands);return e("div",{className:"big-res",style:{color:r.ok&&r.pts?"var(--green)":"var(--soft)"}},r.ok?`達標　+${r.pts}`:"未達標　+0");})(),
@@ -925,7 +954,9 @@ function Scoreboard({active,students,settings,prices,rate,open,applyDelta,undoLa
   return e(React.Fragment,null,
     e("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:14}},
       e("div",{style:{fontWeight:700}},active.name,e("span",{className:"note",style:{marginLeft:8}},students.length," 人")),
-      e("button",{className:"btn gh",onClick:()=>open("add")},"＋ 新增學生")),
+      e("div",{style:{display:"flex",gap:8}},
+        e("button",{className:"btn gh",onClick:()=>open("examtargetbulk")},"🎯 全班設定目標"),
+        e("button",{className:"btn gh",onClick:()=>open("add")},"＋ 新增學生"))),
     e("div",{className:"grid"},students.map(s=>{
       const owed=totalOwed(s,rate);
       const av=totalAssetValue(s,prices);
