@@ -177,6 +177,17 @@ body.kiosk-on .chips{gap:12px;}
 body.kiosk-on .big-res{font-size:34px;}
 body.kiosk-on .mfoot .btn{font-size:19px;padding:14px 26px;}
 body.kiosk-on .toast{font-size:22px;padding:14px 26px;}
+/* 大螢幕模式的螢幕數字鍵盤：教室大螢幕常沒有實體鍵盤，系統也不一定會自動跳出觸控鍵盤 */
+.numpad{position:fixed;left:50%;transform:translateX(-50%);bottom:10px;z-index:300;width:min(380px,94vw);background:#fff;border-radius:18px;padding:10px;box-shadow:0 12px 44px rgba(0,0,0,.38);}
+.numpad-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
+.numpad button{font-size:26px;font-weight:700;padding:9px 0;border-radius:12px;border:1px solid var(--line);background:#f7f7f4;color:#222;cursor:pointer;touch-action:manipulation;user-select:none;-webkit-user-select:none;}
+.numpad button:active{background:#e3e3dc;}
+.numpad button.wide{grid-column:span 2;}
+.numpad button.done{background:#0f9d6b;border-color:#0f9d6b;color:#fff;font-size:22px;}
+.numpad button.alt{font-size:20px;color:#555;}
+body.kiosk-on.pad-on .overlay{padding-bottom:318px;}
+body.kiosk-on.pad-on .modal{max-height:calc(100vh - 340px);}
+body.kiosk-on.pad-on .kiosk{padding-bottom:330px;}
 
 /* Loan partial */
 .loan-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:10px;}
@@ -345,6 +356,42 @@ function Modal({title,onClose,foot,children,lg}){
 }
 
 // ===== Kiosk View（給孩子在大螢幕上自助登記用）=====
+// ===== 大螢幕模式的螢幕數字鍵盤 =====
+// 按鍵邏輯：第一次按數字會「取代」原本的內容（例如目標預設 80，直接按 9、0 就是 90），
+// 之後才是接在後面；小數點只能有一個，最多 8 個字元。
+function padApply(cur, key, fresh){
+  cur=String(cur==null?"":cur);
+  if(key==="back") return {value:cur.slice(0,-1),fresh:false};
+  if(key==="clear") return {value:"",fresh:false};
+  const base=fresh?"":cur;
+  if(key==="."){
+    if(base.includes(".")) return {value:cur,fresh};
+    return {value:(base===""?"0":base)+".",fresh:false};
+  }
+  if(base.length>=8) return {value:cur,fresh};
+  return {value:base+key,fresh:false};
+}
+function NumPad({el,onDone}){
+  const e=React.createElement;
+  const fresh=useRef(true);
+  useEffect(()=>{fresh.current=true;},[el]);
+  // React 的受控輸入框要用原生 setter 再送出 input 事件，onChange 才會收到
+  const setNative=v=>{
+    const d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),"value");
+    d.set.call(el,v);
+    el.dispatchEvent(new Event("input",{bubbles:true}));
+  };
+  const press=k=>{const r=padApply(el.value,k,fresh.current);fresh.current=r.fresh;if(r.value!==el.value) setNative(r.value);};
+  // 按鍵不能搶走輸入框的焦點，否則按一下鍵盤就收起來了
+  const key=(k,label,cls)=>e("button",{key:k,type:"button",className:cls||"",onMouseDown:ev=>ev.preventDefault(),onPointerDown:ev=>{ev.preventDefault();press(k);}},label);
+  return e("div",{className:"numpad",onMouseDown:ev=>ev.preventDefault()},
+    e("div",{className:"numpad-grid"},
+      ["7","8","9","4","5","6","1","2","3"].map(k=>key(k,k)),
+      key(".","."), key("0","0"), key("back","⌫","alt"),
+      key("clear","清除","alt"),
+      e("button",{key:"done",type:"button",className:"wide done",onMouseDown:ev=>ev.preventDefault(),onPointerDown:ev=>{ev.preventDefault();onDone();}},"完成")));
+}
+
 function KioskView({students, settings, prices, rate, className, applyDelta, open, buy, sell, repay, fInvest, setFInvest, fRepay, setFRepay, fAssetId, setFAssetId, fTf, setFTf, marketData, kioskStudentId, setKioskStudentId, setKioskMode, pushToast, cooldownUntil, setCooldownUntil}){
   const e = React.createElement;
   const [screen, setScreen] = useState('actions'); // 'actions' | 'market' | 'loan'
@@ -391,7 +438,7 @@ function KioskView({students, settings, prices, rate, className, applyDelta, ope
   },
     e("div", { className: "field" },
       e("label", null, "PIN 碼"),
-      e("input", { className: "inp mono", type: "password", autoFocus: true, value: pinInput, onChange: ev => setPinInput(ev.target.value), onKeyDown: ev => ev.key === "Enter" && attemptExit() }))
+      e("input", { className: "inp mono", type: "password", autoFocus: true, "data-pad": "1", value: pinInput, onChange: ev => setPinInput(ev.target.value), onKeyDown: ev => ev.key === "Enter" && attemptExit() }))
   );
 
   // ----- 還沒選人：大頭貼式名字牌 -----
@@ -473,6 +520,35 @@ function App(){
   const [lastSaved,setLastSaved]=useState(null);
   const [sync,setSync]=useState(HAS_GS?"ok":"err");
   const [kioskMode,setKioskMode]=useState(false);
+  // 大螢幕模式的螢幕數字鍵盤：點到數字輸入框時顯示，綁在被點到的輸入框上
+  const [padEl,setPadEl]=useState(null);
+  useEffect(()=>{
+    if(!kioskMode){setPadEl(null);return;}
+    const isNum=t=>t&&t.tagName==="INPUT"&&(t.dataset.numeric==="1"||t.getAttribute("inputmode")==="numeric");
+    const onIn=ev=>{
+      const t=ev.target;
+      if(isNum(t)){
+        t.dataset.numeric="1";
+        t.setAttribute("inputmode","none");   // 不要再跳出系統鍵盤蓋住數字鍵盤
+        setPadEl(t);
+      }else if(t&&t.tagName==="INPUT"&&t.dataset.pad==="1"){setPadEl(t);}   // 離開用的 PIN：數字鍵盤＋實體鍵盤都能輸入
+      else setPadEl(null);
+    };
+    const onOut=ev=>{
+      const to=ev.relatedTarget;
+      if(to&&to.closest&&to.closest(".numpad")) return;
+      setTimeout(()=>{const a=document.activeElement;if(!(a&&a.tagName==="INPUT"&&(a.dataset.numeric==="1"||a.dataset.pad==="1"))) setPadEl(null);},0);
+    };
+    document.addEventListener("focusin",onIn);
+    document.addEventListener("focusout",onOut);
+    return ()=>{document.removeEventListener("focusin",onIn);document.removeEventListener("focusout",onOut);};
+  },[kioskMode]);
+  useEffect(()=>{
+    try{document.body.classList.toggle("pad-on",!!padEl);}catch(e){}
+    return ()=>{try{document.body.classList.remove("pad-on");}catch(e){}};
+  },[padEl]);
+  // 輸入框被關掉（視窗關閉、換畫面）時，鍵盤跟著收起
+  useEffect(()=>{if(padEl&&!document.body.contains(padEl)) setPadEl(null);});
   const [kioskStudentId,setKioskStudentId]=useState(null);
   const [kioskCooldownUntil,setKioskCooldownUntil]=useState(0);
   const [dbUrl,setDbUrl]=useState("");
@@ -909,7 +985,8 @@ function App(){
     modal&&modal.kind==="io"&&e(Modal,{lg:true,title:"匯入資料",onClose:close,foot:e(React.Fragment,null,e("button",{className:"btn gh",onClick:close},"取消"),e("button",{className:"btn pri",onClick:importData},"匯入"))},
       e("div",{className:"note"},"貼上備份 JSON，將覆蓋目前所有資料。"),
       e("textarea",{className:"inp mono",style:{minHeight:160,resize:"vertical"},value:fImport,onChange:ev=>setFImport(ev.target.value)})
-    )
+    ),
+    kioskMode&&padEl&&e(NumPad,{el:padEl,onDone:()=>{try{padEl.blur();}catch(err){}setPadEl(null);}})
   );
 }
 
@@ -972,7 +1049,7 @@ function Scoreboard({active,students,settings,prices,rate,open,applyDelta,undoLa
         e("div",{className:"more"},
           e("button",{className:"mini",onClick:()=>open("examtarget",s.id)},"🎯 月考目標"),
           e("button",{className:"mini",onClick:()=>open("examscore",s.id)},"📝 月考成績"),
-          e("button",{className:"mini",onClick:()=>open("tutor",s.id)},"輔導"),
+          // 「輔導」按鈕已移除（學生端與老師端都沒有）：輔導加分改由教師後台的「輔導配對」結算，進步分數由月考紀錄自動計算
           e("button",{className:"mini",onClick:()=>{setTradeId(s.id);setTab("market");}},"投資"),
           e("button",{className:"mini",onClick:()=>open("borrow",s.id)},"借貸"),
           e("button",{className:"mini",onClick:()=>open("leave",s.id)},"請假"),
